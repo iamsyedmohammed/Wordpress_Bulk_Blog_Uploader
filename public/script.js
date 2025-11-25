@@ -104,7 +104,8 @@ form.addEventListener('submit', async (e) => {
 
         const response = await fetch('/upload', {
             method: 'POST',
-            body: formData
+            body: formData,
+            credentials: 'include' // Include cookies for authentication
         });
         
         const data = await response.json();

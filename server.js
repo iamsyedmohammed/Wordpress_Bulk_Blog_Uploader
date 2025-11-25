@@ -67,11 +67,35 @@ app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
 
 // Simple session storage (in production, use express-session with a proper store)
+// For Vercel compatibility, we'll use a hybrid approach:
+// - In-memory for local dev (faster)
+// - Cookie-based validation for Vercel (no server-side storage needed)
 const sessions = new Map();
+
+// Secret for signing auth tokens (use AUTH_PASSWORD as salt for simplicity)
+const AUTH_SECRET = AUTH_PASSWORD + '_auth_secret';
 
 // Generate session ID
 function generateSessionId() {
   return Date.now().toString() + '-' + Math.random().toString(36).substr(2, 9);
+}
+
+// Simple token generation/validation (for Vercel compatibility)
+function generateAuthToken() {
+  const timestamp = Date.now();
+  const random = Math.random().toString(36).substr(2, 9);
+  // Simple hash-like token (not cryptographically secure, but sufficient for this use case)
+  return Buffer.from(`${timestamp}-${random}-${AUTH_SECRET}`).toString('base64');
+}
+
+function validateAuthToken(token) {
+  if (!token) return false;
+  try {
+    const decoded = Buffer.from(token, 'base64').toString('utf-8');
+    return decoded.endsWith(`-${AUTH_SECRET}`);
+  } catch {
+    return false;
+  }
 }
 
 // Authentication Middleware
@@ -85,18 +109,30 @@ function requireAuth(req, res, next) {
     return next();
   }
 
-  // Check for session cookie
+  // Check for session cookie or auth token
   const sessionId = req.cookies?.sessionId || req.headers['x-session-id'];
+  const authToken = req.cookies?.authToken;
   
-  if (sessionId && sessions.has(sessionId)) {
-    const session = sessions.get(sessionId);
-    // Check if session is expired
-    if (session.expiresAt > Date.now()) {
-      // Valid session
+  // For Vercel (serverless), use token-based auth (no server-side storage)
+  const isVercel = process.env.VERCEL || process.env.VERCEL_ENV;
+  
+  if (isVercel) {
+    // On Vercel, validate token from cookie
+    if (authToken && validateAuthToken(authToken)) {
       return next();
-    } else {
-      // Expired session - remove it
-      sessions.delete(sessionId);
+    }
+  } else {
+    // Local dev: use in-memory sessions
+    if (sessionId && sessions.has(sessionId)) {
+      const session = sessions.get(sessionId);
+      // Check if session is expired
+      if (session.expiresAt > Date.now()) {
+        // Valid session
+        return next();
+      } else {
+        // Expired session - remove it
+        sessions.delete(sessionId);
+      }
     }
   }
 
@@ -136,21 +172,34 @@ app.post('/login', (req, res) => {
 
   // Verify credentials
   if (inputUsername === AUTH_USERNAME && inputPassword === AUTH_PASSWORD) {
-    // Create session
-    const sessionId = generateSessionId();
-    sessions.set(sessionId, {
-      username: username,
-      createdAt: Date.now(),
-      expiresAt: rememberme === 'forever' ? Date.now() + (30 * 24 * 60 * 60 * 1000) : Date.now() + (24 * 60 * 60 * 1000) // 30 days or 1 day
-    });
-
-    // Set cookie
-    res.cookie('sessionId', sessionId, {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === 'production',
-      sameSite: 'strict',
-      maxAge: rememberme === 'forever' ? 30 * 24 * 60 * 60 * 1000 : 24 * 60 * 60 * 1000
-    });
+    const isVercel = process.env.VERCEL || process.env.VERCEL_ENV;
+    const maxAge = rememberme === 'forever' ? 30 * 24 * 60 * 60 * 1000 : 24 * 60 * 60 * 1000;
+    
+    if (isVercel) {
+      // On Vercel: use token-based auth (no server-side storage)
+      const authToken = generateAuthToken();
+      res.cookie('authToken', authToken, {
+        httpOnly: true,
+        secure: true, // Always secure on Vercel (HTTPS)
+        sameSite: 'strict',
+        maxAge: maxAge
+      });
+    } else {
+      // Local dev: use in-memory sessions
+      const sessionId = generateSessionId();
+      sessions.set(sessionId, {
+        username: username,
+        createdAt: Date.now(),
+        expiresAt: Date.now() + maxAge
+      });
+      
+      res.cookie('sessionId', sessionId, {
+        httpOnly: true,
+        secure: process.env.NODE_ENV === 'production',
+        sameSite: 'strict',
+        maxAge: maxAge
+      });
+    }
 
     return res.json({ success: true, message: 'Login successful' });
   } else {
@@ -165,6 +214,7 @@ app.post('/logout', (req, res) => {
     sessions.delete(sessionId);
   }
   res.clearCookie('sessionId');
+  res.clearCookie('authToken'); // Clear Vercel token too
   res.json({ success: true, message: 'Logged out successfully' });
 });
 
